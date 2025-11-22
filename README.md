@@ -2,7 +2,7 @@
 git add .
 ```
 ```bash
-git commit -m "Message du commit"
+git commit -m "Function"
 ```
 ```bash
 git push origin main
