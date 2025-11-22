@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:trading/navigateur.dart';
-import 'services/strategie/strategie.dart';
+import 'services/strategie.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

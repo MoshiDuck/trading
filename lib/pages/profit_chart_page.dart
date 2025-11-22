@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../components/model.dart';
-import '../services/strategie/strategie.dart';
+import '../services/strategie.dart';
 import '../services/btc_data.dart';
 import '../types/types.dart';
 

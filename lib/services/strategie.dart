@@ -2,11 +2,11 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:synchronized/synchronized.dart';
+import 'package:trading/services/technical_indicators.dart';
 import '../../components/model.dart';
 import '../../types/types.dart';
-import '../btc_data.dart';
-import '../technical_indicators.dart';
 import '../../api/strike/strike.dart';
+import 'btc_data.dart';
 
 class TradingStrategie {
   static const SafetyBounds BORNES_SECURITE = SafetyBounds(
@@ -67,6 +67,11 @@ class TradingStrategie {
   double _rsiValue = 50.0;
   DateTime _lastIndicatorUpdate = DateTime.now();
 
+  // NOUVEAU: Variables pour forcer l'achat et la vente
+  bool _forceAchat = false;
+  bool _forceVente = false;
+  Timer? _timerExecutionAutomatique;
+
   void _initialiserDernierAchatDepuisHistorique() {
     if (historiqueTrades.isEmpty) {
       dernierAchat = null;
@@ -89,7 +94,143 @@ class TradingStrategie {
     }
   }
 
-  TradingStrategie();
+  TradingStrategie() {
+    // Démarrer l'exécution automatique
+    _demarrerExecutionAutomatique();
+  }
+
+  // NOUVELLE MÉTHODE: Démarrer l'exécution automatique
+  void _demarrerExecutionAutomatique() {
+    _timerExecutionAutomatique = Timer.periodic(Duration(minutes: 5), (timer) async {
+      try {
+        await _executerStrategieAutomatique();
+      } catch (e) {
+        print('❌ Erreur lors de l\'exécution automatique: $e');
+      }
+    });
+    print('🔄 Exécution automatique démarrée - Vérification toutes les 5 minutes');
+  }
+
+  // NOUVELLE MÉTHODE: Exécution automatique de la stratégie
+  Future<void> _executerStrategieAutomatique() async {
+    if (_enCoursExecution) {
+      return;
+    }
+
+    try {
+      print('🤖 Début de l\'exécution automatique...');
+
+      // Évaluer le marché
+      final evaluation = await evaluerMarche();
+
+      // Exécuter les ventes automatiquement
+      for (var decisionVente in evaluation.decisionsVente) {
+        if (decisionVente.vendre) {
+          print('🔄 Exécution automatique de la vente: ${decisionVente.raison}');
+          await executerVenteStrike(decisionVente);
+          // Pause entre les exécutions
+          await Future.delayed(Duration(seconds: 2));
+        }
+      }
+
+      // Exécuter l'achat automatiquement (sauf si forçage désactivé)
+      if (evaluation.decisionAchat.acheter && !_forceAchat) {
+        print('🔄 Exécution automatique de l\'achat: ${evaluation.decisionAchat.raison}');
+        await executerAchatStrike(evaluation.decisionAchat);
+      }
+
+      print('✅ Exécution automatique terminée');
+    } catch (e) {
+      print('❌ Erreur lors de l\'exécution automatique: $e');
+    }
+  }
+
+  // NOUVELLE MÉTHODE: Activer/désactiver le forçage d'achat
+  void setForceAchat(bool force) {
+    _forceAchat = force;
+    print('🔄 Forçage d\'achat: ${force ? 'ACTIVÉ' : 'DÉSACTIVÉ'}');
+
+    // Si le forçage est activé, exécuter immédiatement
+    if (force) {
+      _executerStrategieAutomatique();
+    }
+  }
+
+  // NOUVELLE MÉTHODE: Activer/désactiver le forçage de vente
+  void setForceVente(bool force) {
+    _forceVente = force;
+    print('🔄 Forçage de vente: ${force ? 'ACTIVÉ' : 'DÉSACTIVÉ'}');
+
+    // Si le forçage est activé, exécuter immédiatement
+    if (force) {
+      _executerStrategieAutomatique();
+    }
+  }
+
+  Future<void> forcerVenteTousTrades() async {
+    return _lock.synchronized(() async {
+      if (_enCoursExecution) {
+        throw Exception('Une exécution est déjà en cours');
+      }
+
+      _enCoursExecution = true;
+
+      try {
+        // ⭐ CORRECTION : Utiliser l'historique des trades directement
+        final tradesOuverts = historiqueTrades.where((t) =>
+        !t.vendu &&
+            t.typeTrade == TypeTrade.ACHAT &&
+            !t.estVente
+        ).toList();
+
+        print('🔍 Trades ouverts trouvés: ${tradesOuverts.length}');
+
+        if (tradesOuverts.isEmpty) {
+          throw Exception('Aucun trade ouvert à vendre');
+        }
+
+        final prixActuel = (await BTCDataService.getBitcoinData()).price;
+
+        for (var trade in tradesOuverts) {
+          try {
+            print('🔄 Traitement du trade ${trade.id} - Quantité: ${trade.quantite}');
+
+            final decisionVente = DecisionVente(
+              vendre: true,
+              trade: trade,
+              raison: 'VENTE FORCÉE - Tous les trades',
+              typeVente: TypeVente.VENTE_FORCEE,
+              prixVente: prixActuel,
+              metrics: {
+                'profit_actuel': trade.calculerProfitAvecPrixActuel(prixActuel).toStringAsFixed(2) + '%',
+                'mode': 'VENTE FORCÉE',
+              },
+            );
+
+            print('🔄 Vente forcée du trade ${trade.id}');
+            await executerVenteStrike(decisionVente);
+
+            // Pause entre les ventes
+            await Future.delayed(Duration(seconds: 3));
+          } catch (e) {
+            print('❌ Erreur lors de la vente du trade ${trade.id}: $e');
+            // Continuer avec les autres trades
+          }
+        }
+
+        print('✅ Vente forcée de tous les trades terminée');
+      } catch (e) {
+        print('❌ Erreur lors de la vente forcée: $e');
+        rethrow;
+      } finally {
+        _enCoursExecution = false;
+        _forceVente = false;
+      }
+    });
+  }
+
+  bool get forceAchatActive => _forceAchat;
+  bool get forceVenteActive => _forceVente;
 
   Future<void> rechargerDonneesCompletes() async {
     _enCoursExecution = false;
@@ -359,8 +500,7 @@ class TradingStrategie {
     }
   }
 
-  // MÉTHODE PRINCIPALE MODIFIÉE : Évaluation du marché
-  Future<StrategieEvaluation> evaluerMarche() async {
+  Future<StrategieEvaluation> evaluerMarche({bool forceEvaluation = false}) async {
     return _lock.synchronized(() async {
       _enCoursExecution = true;
 
@@ -372,44 +512,59 @@ class TradingStrategie {
 
         mettreAJourProfits(marketDataEtendu['prixActuel']);
 
-        if (marketDataEtendu['prixMax6Mois'] == null) {
-          _drawdownActuel = 0.0;
-          _palierActuel = null;
-          return StrategieEvaluation(
-            prixActuel: marketDataEtendu['prixActuel'],
-            prixMax6Mois: null,
-            drawdownActuel: 0.0,
-            palierActuel: null,
-            decisionAchat: DecisionAchat(
-              acheter: false,
-              raison: 'Données historiques non disponibles',
-            ),
-            decisionsVente: [],
-            capitalDisponible: balanceStrike.soldeEUR,
-            tradesOuverts: historiqueTrades.where((t) => !t.vendu).length,
-            timestamp: DateTime.now(),
-            balanceStrike: balanceStrike,
-            transactionsRecent: transactionsRecent,
-          );
+        // ⭐ CORRECTION : Toujours générer un palier en mode forçage
+        if (_forceAchat || forceEvaluation) {
+          final drawdownActuel = marketDataEtendu['prixMax6Mois'] != null
+              ? _calculerDrawdownCorrige(marketDataEtendu['prixActuel'], marketDataEtendu['prixMax6Mois']!.toDouble())
+              : -10.0; // Valeur par défaut pour forçage
+
+          // Générer un palier même sans données historiques
+          final palierActuel = _genererPalierDynamique(drawdownActuel, marketDataEtendu['prixActuel']);
+
+          _drawdownActuel = drawdownActuel;
+          _palierActuel = palierActuel;
+        } else {
+          // Logique normale...
+          if (marketDataEtendu['prixMax6Mois'] == null) {
+            _drawdownActuel = 0.0;
+            _palierActuel = null;
+            return StrategieEvaluation(
+              prixActuel: marketDataEtendu['prixActuel'],
+              prixMax6Mois: null,
+              drawdownActuel: 0.0,
+              palierActuel: null,
+              decisionAchat: DecisionAchat(
+                acheter: false,
+                raison: 'Données historiques non disponibles',
+              ),
+              decisionsVente: [],
+              capitalDisponible: balanceStrike.soldeEUR,
+              tradesOuverts: historiqueTrades.where((t) => !t.vendu).length,
+              timestamp: DateTime.now(),
+              balanceStrike: balanceStrike,
+              transactionsRecent: transactionsRecent,
+            );
+          }
+
+          final prixMax6Mois = marketDataEtendu['prixMax6Mois']!.toDouble();
+          final drawdownActuel = _calculerDrawdownCorrige(marketDataEtendu['prixActuel'], prixMax6Mois);
+
+          // GÉNÉRATION DYNAMIQUE DU PALIER
+          final palierActuel = _genererPalierDynamique(drawdownActuel, marketDataEtendu['prixActuel']);
+
+          _drawdownActuel = drawdownActuel;
+          _palierActuel = palierActuel;
         }
 
-        final prixMax6Mois = marketDataEtendu['prixMax6Mois']!.toDouble();
-        final drawdownActuel = _calculerDrawdownCorrige(marketDataEtendu['prixActuel'], prixMax6Mois);
-
-        // GÉNÉRATION DYNAMIQUE DU PALIER
-        final palierActuel = _genererPalierDynamique(drawdownActuel, marketDataEtendu['prixActuel']);
-
-        _drawdownActuel = drawdownActuel;
-        _palierActuel = palierActuel;
-
-        analyserOpportunites(palierActuel, drawdownActuel);
+        analyserOpportunites(_palierActuel, _drawdownActuel);
 
         final decisionAchat = await _evaluerConditionsAchatReel(
-          palierActuel,
-          drawdownActuel,
+          _palierActuel,
+          _drawdownActuel,
           marketDataEtendu['prixActuel'],
           balanceStrike.soldeEUR,
           marketDataEtendu,
+          forceEvaluation: _forceAchat || forceEvaluation,
         );
 
         final decisionsVente = await _evaluerConditionsVenteAmeliorees(
@@ -419,9 +574,9 @@ class TradingStrategie {
 
         return StrategieEvaluation(
           prixActuel: marketDataEtendu['prixActuel'],
-          prixMax6Mois: prixMax6Mois,
-          drawdownActuel: drawdownActuel,
-          palierActuel: palierActuel,
+          prixMax6Mois: marketDataEtendu['prixMax6Mois']?.toDouble(),
+          drawdownActuel: _drawdownActuel,
+          palierActuel: _palierActuel,
           decisionAchat: decisionAchat,
           decisionsVente: decisionsVente,
           capitalDisponible: balanceStrike.soldeEUR,
@@ -430,7 +585,7 @@ class TradingStrategie {
           balanceStrike: balanceStrike,
           transactionsRecent: transactionsRecent,
           marketDataEtendu: marketDataEtendu,
-          metrics: palierActuel.metrics,
+          metrics: _palierActuel?.metrics,
         );
       } catch (e) {
         print('❌ Erreur lors de l\'évaluation de la stratégie: $e');
@@ -473,8 +628,73 @@ class TradingStrategie {
       double prixActuel,
       double capitalReel,
       Map<String, dynamic> marketData,
+      {bool forceEvaluation = false}
       ) async {
 
+    // NOUVEAU: Vérification du forçage d'achat
+    if (_forceAchat || forceEvaluation) {
+      print('🔄 Évaluation forcée - Ignore les restrictions de temps et de palier');
+
+      if (capitalReel < 0.01) {
+        return DecisionAchat(
+          acheter: false,
+          raison: 'Capital insuffisant (${capitalReel.toStringAsFixed(2)} EUR)',
+        );
+      }
+
+      if (palierActuel == null) {
+        // Générer un palier même si hors des plages normales
+        palierActuel = _genererPalierDynamique(drawdownActuel, prixActuel);
+      }
+
+      final montantInvestissement = _calculerMontantInvestissementReel(palierActuel, capitalReel);
+
+      if (montantInvestissement < 0.01) {
+        return DecisionAchat(
+          acheter: false,
+          raison: 'Montant d\'investissement trop faible (${montantInvestissement.toStringAsFixed(2)} EUR)',
+        );
+      }
+
+      if (montantInvestissement > MONTANT_MAXIMAL_ACHAT) {
+        return DecisionAchat(
+          acheter: false,
+          raison: 'Montant d\'investissement trop élevé (${montantInvestissement.toStringAsFixed(2)} EUR)',
+        );
+      }
+
+      if (montantInvestissement > capitalReel) {
+        return DecisionAchat(
+          acheter: false,
+          raison: 'Solde EUR insuffisant (${capitalReel.toStringAsFixed(2)} disponible)',
+        );
+      }
+
+      final takeProfitDynamique = _calculerPrixTakeProfit(prixActuel, palierActuel);
+      final takeProfitPercent = ((takeProfitDynamique - prixActuel) / prixActuel * 100);
+
+      return DecisionAchat(
+        acheter: true,
+        raison: 'ACHAT FORCÉ - Conditions bypassées pour le palier ${palierActuel.nom}',
+        palier: palierActuel,
+        montantInvestissement: montantInvestissement,
+        prixCibleAchat: _calculerPrixCibleAchat(prixActuel),
+        takeProfit: takeProfitDynamique,
+        fraisEstimes: 0.0,
+        capitalReel: capitalReel,
+        metrics: {
+          'atr': '${_atrValue.toStringAsFixed(2)} (${(_atrValue / prixActuel * 100).toStringAsFixed(2)}%)',
+          'rsi': _rsiValue.toStringAsFixed(1),
+          'takeProfitPercent': takeProfitPercent.toStringAsFixed(1) + '%',
+          'drawdownActuel': drawdownActuel.toStringAsFixed(1) + '%',
+          'scoreGlobal': palierActuel.metrics['scoreGlobal'].toString(),
+          'confidenceLevel': palierActuel.metrics['confidenceLevel'],
+          'mode': 'FORÇAGE ACTIVÉ',
+        },
+      );
+    }
+
+    // ÉVALUATION NORMALE (code existant)
     if (capitalReel < 0.01) {
       return DecisionAchat(
         acheter: false,
@@ -720,6 +940,7 @@ class TradingStrategie {
       tradesParPalier[trade.palier.nom] = (tradesParPalier[trade.palier.nom] ?? 0) + 1;
     }
   }
+
   Future<Trade> executerAchatStrike(DecisionAchat decision) async {
     if (!decision.acheter) {
       throw Exception('Tentative d\'exécution d\'un achat non autorisé: ${decision.raison}');
@@ -780,7 +1001,7 @@ class TradingStrategie {
 
         print('✅ Devis créé - ID: $quoteId');
 
-        // VÉRIFICATION SI CETTE QUOTE A DÉJÀ ÉTÉ EXÉCUTÉE
+        // ⭐ CORRECTION RENFORCÉE : Vérification si cette quote a déjà été exécutée
         final existingTrade = historiqueTrades.firstWhere(
               (trade) => trade.strikeQuoteId == quoteId,
           orElse: () => Trade.empty(),
@@ -852,9 +1073,11 @@ class TradingStrategie {
 
         final nouvelleBalance = await _getBalanceStrike();
 
-        // CRÉATION DU TRADE
+        // ⭐ CORRECTION : Création du trade avec un ID unique basé sur le timestamp
+        final tradeId = 'REEL_${DateTime.now().millisecondsSinceEpoch}';
+
         final trade = Trade(
-          id: 'REEL_${DateTime.now().millisecondsSinceEpoch}',
+          id: tradeId,
           prixAchat: prixReelAchat,
           quantite: quantiteReelle,
           takeProfit: decision.takeProfit!,
@@ -866,14 +1089,24 @@ class TradingStrategie {
           soldeEURApres: nouvelleBalance.soldeEUR,
         );
 
+        // ⭐ CORRECTION : Vérification finale avant ajout
+        final doublon = historiqueTrades.any((t) => t.strikeQuoteId == quoteId);
+        if (doublon) {
+          throw Exception('❌ Doublon détecté avant ajout du trade: $quoteId');
+        }
+
         // AJOUT DU TRADE À L'HISTORIQUE
         historiqueTrades.add(trade);
         dernierAchat = DateTime.now();
         dernierPalierAchete = decision.palier;
 
+        // DÉSACTIVER LE FORÇAGE APRÈS EXÉCUTION
+        _forceAchat = false;
+
         print('🎉 ACHAT RÉUSSI - ${quantiteReelle.toStringAsFixed(8)} BTC à ${prixReelAchat.toStringAsFixed(2)} EUR');
         print('💶 Montant investi: ${montantInvestissementAjuste.toStringAsFixed(2)} EUR');
         print('📈 Take-profit: ${decision.takeProfit!.toStringAsFixed(2)} EUR');
+        print('🆔 Trade créé: $tradeId, Quote: $quoteId');
 
         return trade;
       } catch (e) {
@@ -1012,7 +1245,6 @@ class TradingStrategie {
   String _formaterDescriptionVente(double quantiteBTC, double prixVente, double drawdownActuel, double pnlPercent) {
     return 'STRATÉGIE VENTE BTC:${quantiteBTC.toStringAsFixed(8)}, EUR:${prixVente.toStringAsFixed(2)}, Drawdown%:${drawdownActuel.toStringAsFixed(2)}, PnL%:${pnlPercent.toStringAsFixed(2)}';
   }
-
   Future<void> chargerHistoriqueStrike() async {
     try {
       final response = await strikeApi.getInvoices();
@@ -1023,7 +1255,15 @@ class TradingStrategie {
         return;
       }
 
-      historiqueTrades.removeWhere((trade) => trade.strikeQuoteId != null && trade.strikeQuoteId!.startsWith('STRIKE_'));
+      // ⭐ CORRECTION : Ne pas supprimer les trades existants, seulement les doublons
+      final seenQuoteIds = <String>{};
+
+      // Première passe : identifier tous les quoteIds existants pour éviter les doublons
+      for (var trade in historiqueTrades) {
+        if (trade.strikeQuoteId != null) {
+          seenQuoteIds.add(trade.strikeQuoteId!);
+        }
+      }
 
       final tradesAchats = invoices.where((invoice) {
         final description = invoice['description']?.toString() ?? '';
@@ -1045,15 +1285,22 @@ class TradingStrategie {
         return isVente && isBTC;
       }).toList();
 
+      int nouveauxTradesAjoutes = 0;
+
       for (var facture in tradesAchats) {
         try {
           final id = facture['invoiceId']?.toString() ?? 'INCONNU';
-          final description = facture['description']?.toString() ?? '';
 
-          final existeDeja = historiqueTrades.any((trade) => trade.strikeQuoteId == id);
+          // ⭐ CORRECTION : Vérifier si ce trade existe déjà dans l'historique
+          final existeDeja = seenQuoteIds.contains(id) ||
+              historiqueTrades.any((trade) => trade.strikeQuoteId == id);
+
           if (existeDeja) {
+            print('🔍 Trade ACHAT déjà existant, ignoré: $id');
             continue;
           }
+
+          final description = facture['description']?.toString() ?? '';
 
           double quantiteBTC = 0.0;
           double montantEUR = 0.0;
@@ -1111,6 +1358,9 @@ class TradingStrategie {
             );
 
             historiqueTrades.add(trade);
+            seenQuoteIds.add(id);
+            nouveauxTradesAjoutes++;
+            print('✅ Trade ACHAT historique ajouté: $id');
           }
         } catch (e) {
           print('❌ Erreur parsing facture ACHAT Strike: $e');
@@ -1120,12 +1370,17 @@ class TradingStrategie {
       for (var facture in tradesVentes) {
         try {
           final id = facture['invoiceId']?.toString() ?? 'INCONNU';
-          final description = facture['description']?.toString() ?? '';
 
-          final existeDeja = historiqueTrades.any((trade) => trade.strikeQuoteId == id);
+          // ⭐ CORRECTION : Vérifier si ce trade existe déjà dans l'historique
+          final existeDeja = seenQuoteIds.contains(id) ||
+              historiqueTrades.any((trade) => trade.strikeQuoteId == id);
+
           if (existeDeja) {
+            print('🔍 Trade VENTE déjà existant, ignoré: $id');
             continue;
           }
+
+          final description = facture['description']?.toString() ?? '';
 
           double quantiteBTC = 0.0;
           double prixVenteReel = 0.0;
@@ -1171,40 +1426,64 @@ class TradingStrategie {
             );
 
             historiqueTrades.add(trade);
+            seenQuoteIds.add(id);
+            nouveauxTradesAjoutes++;
+            print('✅ Trade VENTE historique ajouté: $id');
           }
         } catch (e) {
           print('❌ Erreur parsing facture VENTE Strike: $e');
         }
       }
+
       final btcData = await BTCDataService.getBitcoinData();
       mettreAJourProfits(btcData.price);
+
+      print('📊 Chargement historique terminé: ${nouveauxTradesAjoutes} nouveaux trades ajoutés');
 
     } catch (e) {
       print('❌ Erreur chargement historique Strike: $e');
     }
   }
 
+
   void nettoyerTradesAberrants() {
     final initialCount = historiqueTrades.length;
     final seenIds = <String>{};
+    final seenQuoteIds = <String>{};
+
     historiqueTrades.removeWhere((trade) {
+      // Vérification des doublons par strikeQuoteId
       if (trade.strikeQuoteId != null) {
-        if (seenIds.contains(trade.strikeQuoteId)) {
+        if (seenQuoteIds.contains(trade.strikeQuoteId)) {
+          print('🔍 Suppression doublon strikeQuoteId: ${trade.strikeQuoteId}');
           return true;
         }
-        seenIds.add(trade.strikeQuoteId!);
+        seenQuoteIds.add(trade.strikeQuoteId!);
       }
 
+      // Vérification des doublons par ID
+      if (seenIds.contains(trade.id)) {
+        print('🔍 Suppression doublon ID: ${trade.id}');
+        return true;
+      }
+      seenIds.add(trade.id);
+
+      // Vérification des prix aberrants pour les achats
       if (!trade.estVente) {
         final prixAchat = trade.prixAchat;
         final isAberrant = prixAchat < 1000 || prixAchat > 200000;
         if (isAberrant) {
+          print('🔍 Suppression trade aberrant: ${trade.id} - Prix: $prixAchat');
           return true;
         }
       }
+
       return false;
     });
+
+    print('🧹 Nettoyage trades: $initialCount -> ${historiqueTrades.length}');
   }
+
 
   Future<Trade> executerAchat(DecisionAchat decision) async => executerAchatStrike(decision);
 
@@ -1268,6 +1547,12 @@ class TradingStrategie {
     dernierAchat = null;
     dernierPalierAchete = null;
     _enCoursExecution = false;
+    _forceAchat = false;
+    _forceVente = false;
+  }
+
+  void dispose() {
+    _timerExecutionAutomatique?.cancel();
   }
 
   bool get enCooldown {
@@ -1384,13 +1669,31 @@ class StrategieService {
     _instance ??= TradingStrategie();
   }
 
-  static Future<StrategieEvaluation> evaluerMarche() async {
-    return await instance.evaluerMarche();
+  static Future<StrategieEvaluation> evaluerMarche({bool forceEvaluation = false}) async {
+    return await instance.evaluerMarche(forceEvaluation: forceEvaluation);
   }
 
   static void resetExecutionLock() {
     instance.resetExecutionLock();
   }
+
+  // NOUVELLE MÉTHODE: Activer/désactiver le forçage d'achat
+  static void setForceAchat(bool force) {
+    instance.setForceAchat(force);
+  }
+
+  // NOUVELLE MÉTHODE: Activer/désactiver le forçage de vente
+  static void setForceVente(bool force) {
+    instance.setForceVente(force);
+  }
+
+  // NOUVELLE MÉTHODE: Forcer la vente de tous les trades
+  static Future<void> forcerVenteTousTrades() async {
+    return await instance.forcerVenteTousTrades();
+  }
+
+  static bool get forceAchatActive => instance.forceAchatActive;
+  static bool get forceVenteActive => instance.forceVenteActive;
 
   static Future<Trade> executerAchat(DecisionAchat decision) async {
     return await instance.executerAchatStrike(decision);
@@ -1406,6 +1709,10 @@ class StrategieService {
 
   static void reset() {
     instance.resetStrategie();
+  }
+
+  static void dispose() {
+    instance.dispose();
   }
 
   static bool get enCoursExecution => instance.enCoursExecution;

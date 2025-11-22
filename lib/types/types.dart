@@ -14,7 +14,7 @@ enum TypeVente {
   STOP_LOSS,
   TRAILING_STOP,
   VOLATILITE_ELEVEE,
-  AUCUNE,
+  AUCUNE, VENTE_FORCEE,
 }
 
 enum ProfitType {

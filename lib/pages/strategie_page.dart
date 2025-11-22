@@ -1,22 +1,18 @@
 import 'package:flutter/material.dart';
 import '../components/model.dart';
-import '../services/strategie/strategie.dart';
+import '../services/strategie.dart';
 import '../types/types.dart';
 
 class StrategiePage extends StatefulWidget {
   final StrategieEvaluation? strategieEvaluation;
   final bool isEvaluatingStrategy;
   final Function() onEvaluateStrategy;
-  final Function() onExecuteAchat;
-  final Function(DecisionVente) onExecuteVente;
 
   const StrategiePage({
     Key? key,
     required this.strategieEvaluation,
     required this.isEvaluatingStrategy,
     required this.onEvaluateStrategy,
-    required this.onExecuteAchat,
-    required this.onExecuteVente,
   }) : super(key: key);
 
   @override
@@ -25,27 +21,28 @@ class StrategiePage extends StatefulWidget {
 
 class _StrategiePageState extends State<StrategiePage> {
   int _selectedView = 0;
+  bool _forceAchatActive = false;
+  bool _forceVenteActive = false;
 
   Widget _buildDataRow(String label, String value, {Color? color}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 2,
-            child: Text(label, style: TextStyle(fontWeight: FontWeight.w500)),
-          ),
-          Expanded(
-            flex: 1,
-            child: Text(
-              value,
-              style: TextStyle(fontWeight: FontWeight.bold, color: color),
-              textAlign: TextAlign.right,
+        padding: const EdgeInsets.symmetric(vertical: 4.0),
+        child: Row(
+          children: [
+            Expanded(
+              flex: 2,
+              child: Text(label, style: TextStyle(fontWeight: FontWeight.w500)),
             ),
-          ),
-        ],
-      ),
-    );
+            Expanded(
+              flex: 1,
+              child: Text(
+                value,
+                style: TextStyle(fontWeight: FontWeight.bold, color: color),
+                textAlign: TextAlign.right,
+              ),
+            ),
+          ],
+        ));
   }
 
   Widget _buildViewSelector() {
@@ -138,20 +135,36 @@ class _StrategiePageState extends State<StrategiePage> {
 
   Widget _buildTransactionsList() {
     final seenIds = <String>{};
+    final seenQuoteIds = <String>{};
 
-    // Récupérer les trades selon la vue sélectionnée
-    List<Trade> tradesFiltres =
-        StrategieService.instance.historiqueTrades.where((trade) {
-          if (trade.strikeQuoteId == null) return false;
-          if (seenIds.contains(trade.strikeQuoteId)) return false;
-          seenIds.add(trade.strikeQuoteId!);
+    // ⭐ CORRECTION : Filtrage amélioré pour éviter les doublons
+    List<Trade> tradesFiltres = StrategieService.instance.historiqueTrades.where((trade) {
+      // Exclusion des trades sans strikeQuoteId
+      if (trade.strikeQuoteId == null) return false;
 
-          if (_selectedView == 0) {
-            return trade.typeTrade == TypeTrade.ACHAT && !trade.estVente;
-          } else {
-            return trade.estVente;
-          }
-        }).toList()..sort((a, b) => b.dateAchat.compareTo(a.dateAchat));
+      // Vérification des doublons par strikeQuoteId
+      if (seenQuoteIds.contains(trade.strikeQuoteId)) {
+        print('🔍 Exclusion doublon dans l\'UI: ${trade.strikeQuoteId}');
+        return false;
+      }
+      seenQuoteIds.add(trade.strikeQuoteId!);
+
+      // Vérification des doublons par ID
+      if (seenIds.contains(trade.id)) {
+        print('🔍 Exclusion doublon ID dans l\'UI: ${trade.id}');
+        return false;
+      }
+      seenIds.add(trade.id);
+
+      // Filtrage par type de vue
+      if (_selectedView == 0) {
+        return trade.typeTrade == TypeTrade.ACHAT && !trade.estVente;
+      } else {
+        return trade.estVente;
+      }
+    }).toList()..sort((a, b) => b.dateAchat.compareTo(a.dateAchat));
+
+    print('📊 Transactions filtrées: ${tradesFiltres.length} (vue: ${_selectedView == 0 ? 'Achats' : 'Ventes'})');
 
     if (tradesFiltres.isEmpty) {
       return Container(
@@ -268,7 +281,7 @@ class _StrategiePageState extends State<StrategiePage> {
     if (trade.strikeQuoteId != null) {
       // Chercher dans l'historique Strike pour récupérer la description complète
       final strikeTrade = StrategieService.instance.historiqueTrades.firstWhere(
-        (t) => t.strikeQuoteId == trade.strikeQuoteId,
+            (t) => t.strikeQuoteId == trade.strikeQuoteId,
         orElse: () => trade,
       );
 
@@ -506,6 +519,10 @@ class _StrategiePageState extends State<StrategiePage> {
         return 'Stop Loss 🛑';
       case TypeVente.TRAILING_STOP:
         return 'Trailing Stop 📈';
+      case TypeVente.VENTE_FORCEE:
+        return 'Vente Forcée ⚡';
+      case TypeVente.VOLATILITE_ELEVEE:
+        return 'Volatilité Élevée 🌊';
       default:
         return 'Vente';
     }
@@ -560,12 +577,320 @@ class _StrategiePageState extends State<StrategiePage> {
     );
   }
 
+  // ⭐ CORRECTION CRITIQUE : BOUTON POUR FORCER L'ACHAT avec exécution immédiate
+  Widget _buildBoutonForceAchat() {
+    return Card(
+      elevation: 3,
+      color: _forceAchatActive ? Colors.orange[100] : Colors.grey[100],
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.lock_open,
+                  color: _forceAchatActive ? Colors.orange : Colors.grey,
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'FORÇAGE D\'ACHAT',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: _forceAchatActive ? Colors.orange : Colors.grey,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 8),
+            Text(
+              _forceAchatActive
+                  ? '⚠️ Mode forçage ACTIVÉ - Ignore les restrictions de temps et de drawdown'
+                  : 'Débloquer l\'achat malgré les restrictions actuelles',
+              style: TextStyle(fontSize: 12),
+            ),
+            SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      setState(() {
+                        _forceAchatActive = !_forceAchatActive;
+                        StrategieService.setForceAchat(_forceAchatActive);
+                      });
+
+                      if (_forceAchatActive) {
+                        // ⭐ CORRECTION : Exécution IMMÉDIATE après activation
+                        try {
+                          // Réévaluer avec forçage
+                          await widget.onEvaluateStrategy();
+
+                          // Attendre un peu pour que l'évaluation se fasse
+                          await Future.delayed(Duration(seconds: 2));
+
+                          // Vérifier si l'achat est maintenant possible
+                          final nouvelleEvaluation = await StrategieService.evaluerMarche(forceEvaluation: true);
+
+                          if (nouvelleEvaluation.decisionAchat.acheter) {
+                            // ⭐ EXÉCUTION IMMÉDIATE DE L'ACHAT
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('🔄 Exécution immédiate de l\'achat forcé...'),
+                                backgroundColor: Colors.orange,
+                              ),
+                            );
+
+                            await StrategieService.executerAchat(nouvelleEvaluation.decisionAchat);
+
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('✅ Achat forcé exécuté avec succès!'),
+                                backgroundColor: Colors.green,
+                              ),
+                            );
+
+                            // Recharger les données
+                            await widget.onEvaluateStrategy();
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('❌ Achat toujours impossible: ${nouvelleEvaluation.decisionAchat.raison}'),
+                                backgroundColor: Colors.red,
+                              ),
+                            );
+                          }
+                        } catch (e) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('❌ Erreur lors de l\'achat forcé: $e'),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                        }
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _forceAchatActive ? Colors.orange : Colors.grey,
+                      foregroundColor: Colors.white,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(_forceAchatActive ? Icons.lock_open : Icons.lock_outline),
+                        SizedBox(width: 8),
+                        Text(_forceAchatActive ? 'ACHETER MAINTENANT' : 'ACTIVER LE FORÇAGE'),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (_forceAchatActive) ...[
+              SizedBox(height: 8),
+              Container(
+                padding: EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.orange[50],
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  '⚠️ Attention: Le forçage ignore les restrictions de cooldown, RSI et drawdown. Utilisez avec prudence.',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.orange[800],
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ⭐ CORRECTION CRITIQUE : BOUTON POUR FORCER LA VENTE avec historique correct
+  Widget _buildBoutonForceVente() {
+    // ⭐ CORRECTION : Utiliser les trades NON VENDUS de l'historique
+    final tradesOuverts = StrategieService.instance.historiqueTrades
+        .where((trade) => !trade.vendu && trade.typeTrade == TypeTrade.ACHAT && !trade.estVente)
+        .toList();
+
+    return Card(
+      elevation: 3,
+      color: _forceVenteActive ? Colors.red[100] : Colors.grey[100],
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.warning,
+                  color: _forceVenteActive ? Colors.red : Colors.grey,
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'FORÇAGE DE VENTE',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: _forceVenteActive ? Colors.red : Colors.grey,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Vendre tous les trades ouverts (${tradesOuverts.length}) immédiatement',
+              style: TextStyle(fontSize: 12),
+            ),
+            SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: tradesOuverts.isNotEmpty ? () async {
+                      setState(() {
+                        _forceVenteActive = true;
+                      });
+
+                      try {
+                        // ⭐ CORRECTION : Vérifier que les trades sont bien dans l'historique
+                        print('🔍 Vérification des trades ouverts: ${tradesOuverts.length}');
+                        for (var trade in tradesOuverts) {
+                          print('📋 Trade ${trade.id} - Quantité: ${trade.quantite} - Vendu: ${trade.vendu}');
+                        }
+
+                        await StrategieService.forcerVenteTousTrades();
+
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('✅ Vente forcée de ${tradesOuverts.length} trades exécutée'),
+                            backgroundColor: Colors.green,
+                          ),
+                        );
+
+                        // Recharger les données
+                        await widget.onEvaluateStrategy();
+
+                      } catch (e) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('❌ Erreur lors de la vente forcée: $e'),
+                            backgroundColor: Colors.red,
+                          ),
+                        );
+                      } finally {
+                        setState(() {
+                          _forceVenteActive = false;
+                        });
+                      }
+                    } : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: tradesOuverts.isNotEmpty ? Colors.red : Colors.grey,
+                      foregroundColor: Colors.white,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.sell),
+                        SizedBox(width: 8),
+                        Text(tradesOuverts.isNotEmpty ? 'FORCER VENTE (${tradesOuverts.length})' : 'AUCUN TRADE OUVERT'),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (_forceVenteActive) ...[
+              SizedBox(height: 8),
+              Container(
+                padding: EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.red[50],
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  '⚠️ Attention: Cette action vend IMMÉDIATEMENT tous vos trades ouverts au prix du marché. Action irréversible.',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.red[800],
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ⭐ NOUVELLE MÉTHODE : INDICATEUR D'AUTOMATISATION
+  Widget _buildIndicateurAutomatisation() {
+    return Card(
+      elevation: 2,
+      color: Colors.green[50],
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Row(
+          children: [
+            Icon(
+              Icons.auto_awesome,
+              color: Colors.green,
+            ),
+            SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '🤖 MODE AUTOMATIQUE ACTIVÉ',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green,
+                    ),
+                  ),
+                  Text(
+                    'Les achats et ventes s\'exécutent automatiquement',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.green,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                'ACTIF',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
       padding: EdgeInsets.all(16),
       child: Column(
         children: [
+          // Indicateur d'automatisation
+          _buildIndicateurAutomatisation(),
+
+          SizedBox(height: 16),
+
           Card(
             elevation: 4,
             child: Padding(
@@ -579,7 +904,7 @@ class _StrategiePageState extends State<StrategiePage> {
                       SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Stratégie de Trading Drawdown',
+                          'Stratégie de Trading Automatique',
                           style: TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
@@ -588,6 +913,21 @@ class _StrategiePageState extends State<StrategiePage> {
                       ),
                     ],
                   ),
+                  SizedBox(height: 12),
+
+                  // ⭐ CORRECTION : Afficher TOUJOURS les boutons de forçage
+                  Column(
+                    children: [
+                      // Bouton forçage achat - TOUJOURS visible
+                      _buildBoutonForceAchat(),
+
+                      SizedBox(height: 12),
+
+                      // Bouton forçage vente - TOUJOURS visible
+                      _buildBoutonForceVente(),
+                    ],
+                  ),
+
                   SizedBox(height: 12),
 
                   if (widget.isEvaluatingStrategy) ...[
@@ -634,7 +974,7 @@ class _StrategiePageState extends State<StrategiePage> {
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(
                           color:
-                              widget.strategieEvaluation!.decisionAchat.acheter
+                          widget.strategieEvaluation!.decisionAchat.acheter
                               ? Colors.green
                               : Colors.orange,
                         ),
@@ -646,10 +986,10 @@ class _StrategiePageState extends State<StrategiePage> {
                                 ? Icons.shopping_cart_checkout
                                 : Icons.pause_circle,
                             color:
-                                widget
-                                    .strategieEvaluation!
-                                    .decisionAchat
-                                    .acheter
+                            widget
+                                .strategieEvaluation!
+                                .decisionAchat
+                                .acheter
                                 ? Colors.green
                                 : Colors.orange,
                           ),
@@ -660,18 +1000,18 @@ class _StrategiePageState extends State<StrategiePage> {
                               children: [
                                 Text(
                                   widget
-                                          .strategieEvaluation!
-                                          .decisionAchat
-                                          .acheter
-                                      ? '✅ ACHAT RECOMMANDÉ'
-                                      : '⏸️ ATTENDRE',
+                                      .strategieEvaluation!
+                                      .decisionAchat
+                                      .acheter
+                                      ? '✅ ACHAT AUTOMATIQUE'
+                                      : '⏸️ ATTENTE AUTOMATIQUE',
                                   style: TextStyle(
                                     fontWeight: FontWeight.bold,
                                     color:
-                                        widget
-                                            .strategieEvaluation!
-                                            .decisionAchat
-                                            .acheter
+                                    widget
+                                        .strategieEvaluation!
+                                        .decisionAchat
+                                        .acheter
                                         ? Colors.green
                                         : Colors.orange,
                                   ),
@@ -684,9 +1024,9 @@ class _StrategiePageState extends State<StrategiePage> {
                                   style: TextStyle(fontSize: 12),
                                 ),
                                 if (widget
-                                        .strategieEvaluation!
-                                        .decisionAchat
-                                        .montantInvestissement !=
+                                    .strategieEvaluation!
+                                    .decisionAchat
+                                    .montantInvestissement !=
                                     null)
                                   Text(
                                     'Montant: ${widget.strategieEvaluation!.decisionAchat.montantInvestissement!.toStringAsFixed(2)} EUR',
@@ -698,19 +1038,6 @@ class _StrategiePageState extends State<StrategiePage> {
                               ],
                             ),
                           ),
-                          if (widget.strategieEvaluation!.decisionAchat.acheter)
-                            ElevatedButton(
-                              onPressed: widget.onExecuteAchat,
-                              child: Text('EXÉCUTER'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.green,
-                                foregroundColor: Colors.white,
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 8,
-                                ),
-                              ),
-                            ),
                         ],
                       ),
                     ),
@@ -723,81 +1050,64 @@ class _StrategiePageState extends State<StrategiePage> {
                         .decisionsVente
                         .isNotEmpty) ...[
                       Text(
-                        'Décisions de Vente (${widget.strategieEvaluation!.decisionsVente.length})',
+                        'Décisions de Vente Automatique (${widget.strategieEvaluation!.decisionsVente.length})',
                         style: TextStyle(fontWeight: FontWeight.bold),
                       ),
                       SizedBox(height: 8),
                       ...widget.strategieEvaluation!.decisionsVente
                           .map(
                             (decision) => Container(
-                              width: double.infinity,
-                              margin: EdgeInsets.only(bottom: 8),
-                              padding: EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 8,
-                              ),
-                              decoration: BoxDecoration(
+                          width: double.infinity,
+                          margin: EdgeInsets.only(bottom: 8),
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                          decoration: BoxDecoration(
+                            color:
+                            decision.typeVente == TypeVente.TAKE_PROFIT
+                                ? Colors.green[50]
+                                : Colors.red[50],
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                decision.typeVente == TypeVente.TAKE_PROFIT
+                                    ? Icons.trending_up
+                                    : Icons.trending_down,
                                 color:
-                                    decision.typeVente == TypeVente.TAKE_PROFIT
-                                    ? Colors.green[50]
-                                    : Colors.red[50],
-                                borderRadius: BorderRadius.circular(8),
+                                decision.typeVente ==
+                                    TypeVente.TAKE_PROFIT
+                                    ? Colors.green
+                                    : Colors.red,
                               ),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    decision.typeVente == TypeVente.TAKE_PROFIT
-                                        ? Icons.trending_up
-                                        : Icons.trending_down,
-                                    color:
-                                        decision.typeVente ==
-                                            TypeVente.TAKE_PROFIT
-                                        ? Colors.green
-                                        : Colors.red,
-                                  ),
-                                  SizedBox(width: 8),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          decision.typeVente ==
-                                                  TypeVente.TAKE_PROFIT
-                                              ? '🎯 TAKE PROFIT'
-                                              : '🛑 STOP LOSS',
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                        Text(
-                                          decision.raison,
-                                          style: TextStyle(fontSize: 12),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  ElevatedButton(
-                                    onPressed: () =>
-                                        widget.onExecuteVente(decision),
-                                    child: Text('VENDRE'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor:
-                                          decision.typeVente ==
-                                              TypeVente.TAKE_PROFIT
-                                          ? Colors.green
-                                          : Colors.red,
-                                      foregroundColor: Colors.white,
-                                      padding: EdgeInsets.symmetric(
-                                        horizontal: 16,
-                                        vertical: 8,
+                              SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      decision.typeVente ==
+                                          TypeVente.TAKE_PROFIT
+                                          ? '🎯 TAKE PROFIT AUTOMATIQUE'
+                                          : '🛑 VENTE AUTOMATIQUE',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
                                       ),
                                     ),
-                                  ),
-                                ],
+                                    Text(
+                                      decision.raison,
+                                      style: TextStyle(fontSize: 12),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                          )
+                            ],
+                          ),
+                        ),
+                      )
                           .toList(),
                     ] else ...[
                       Container(
@@ -824,7 +1134,7 @@ class _StrategiePageState extends State<StrategiePage> {
                                   ? Icons.shopping_bag
                                   : Icons.shopping_bag_outlined,
                               color:
-                                  widget.strategieEvaluation!.tradesOuverts > 0
+                              widget.strategieEvaluation!.tradesOuverts > 0
                                   ? Colors.green
                                   : Colors.grey,
                             ),
@@ -834,8 +1144,8 @@ class _StrategiePageState extends State<StrategiePage> {
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 color:
-                                    widget.strategieEvaluation!.tradesOuverts >
-                                        0
+                                widget.strategieEvaluation!.tradesOuverts >
+                                    0
                                     ? Colors.green
                                     : Colors.grey,
                               ),
